@@ -27,8 +27,8 @@
 
 #include <simd/simd.h>
 
-static constexpr size_t kNumInstances = 32;
-static constexpr size_t lineWidth = 8;
+static constexpr size_t kNumInstances = 8;
+static constexpr size_t lineWidth = 3;
 static constexpr size_t kMaxFramesInFlight = 3;
 
 
@@ -183,7 +183,7 @@ void MyAppDelegate::applicationWillFinishLaunching( NS::Notification* pNotificat
 
 void MyAppDelegate::applicationDidFinishLaunching( NS::Notification* pNotification )
 {
-    CGRect frame = (CGRect){ {100.0, 100.0}, {512.0, 512.0} };
+    CGRect frame = (CGRect){ {100.0, 100.0}, {768, 768} };
 
     _pWindow = NS::Window::alloc()->init(
         frame,
@@ -428,7 +428,8 @@ void Renderer::buildBuffers()
 {
     using simd::float3;
     const float s = 0.5f;
-
+    
+    /*
     float3 verts[] = { // 8 vertices of a triangle
         { -s, -s, +s },
         { +s, -s, +s },
@@ -440,25 +441,49 @@ void Renderer::buildBuffers()
         { +s, +s, -s },
         { +s, -s, -s }
     };
+    */
+    
+//    const float ctp = cos( (2 * M_PI) / 3);
+//    const float stp = sin( (2 * M_PI) / 3);
+//    const float tSecond = s*stp;
 
+    float3 verts[] = { // tetrahedron made of equilateral triangles coordcs
+        {+s, 0, 0},
+        {-s / 3.0f, (2.0f * sqrt(2.0f)) * s / 3.0f, 0.0f},
+        {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, (sqrt(6.0f) / 3) * s},
+        {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, -(sqrt(6.0f) / 3) * s}
+    };
+
+    /*
     uint16_t indices[] = { // all 12 triangles it takes to make 2 triangles for each of the 6 faces of a cube
-        0, 1, 2, /* front */
+        0, 1, 2, front
         2, 3, 0,
 
-        1, 7, 6, /* right */
+        1, 7, 6, right
         6, 2, 1,
 
-        7, 4, 5, /* back */
+        7, 4, 5, back
         5, 6, 7,
 
-        4, 0, 3, /* left */
+        4, 0, 3, left
         3, 5, 4,
 
-        3, 2, 6, /* top */
+        3, 2, 6, top
         6, 5, 3,
 
-        4, 7, 1, /* bottom */
+        4, 7, 1, bottom
         1, 0, 4
+    };
+    
+    */
+    
+    
+    uint16_t indices[] = { // all 12 triangles it takes to make 2 triangles for each of the 6 faces of a cube
+        0, 1, 2, /* front */
+        0, 2, 3,
+
+        0, 3, 1, /* right */
+        1, 3, 2,
     };
 
     const size_t vertexDataSize = sizeof( verts );
@@ -509,10 +534,10 @@ void Renderer::draw( MTK::View* pView )
 
     _angle += 0.01f;
 
-    const float scl = 0.1f;
+    const float scl = 0.5f;
     shader_types::InstanceData* pInstanceData = reinterpret_cast< shader_types::InstanceData *>( pInstanceDataBuffer->contents() );
 
-    float3 objectPosition = { 0.f, 0.f, -5.f };
+    float3 objectPosition = { 0.f, 0.f, -7.f };
 
     // Update instance positions:
 
@@ -520,6 +545,7 @@ void Renderer::draw( MTK::View* pView )
     float4x4 rr = math::makeYRotate( -_angle );
     float4x4 rtInv = math::makeTranslate( { -objectPosition.x, -objectPosition.y, -objectPosition.z } );
     float4x4 fullObjectRot = rt * rr * rtInv;
+//    fullObjectRot = math::makeIdentity();
     
     size_t globalCtr = 0;
 
@@ -527,15 +553,18 @@ void Renderer::draw( MTK::View* pView )
         for ( size_t i = 0; i < kNumInstances; ++i )
         {
             float iDivNumInstances = i / (float)kNumInstances;
-            float xoff = (iDivNumInstances * 2.0f - 1.0f) + (1.f/kNumInstances);
-            float yoff = sin( ( iDivNumInstances + _angle ) * 2.0f * M_PI);
-            float zoff = (-1.0f + (2.0f*j)/lineWidth);
+            float xoff = (iDivNumInstances * 4.0f - 2.0f) + (1.f/kNumInstances);
+            float yoff = sin( ( iDivNumInstances + _angle ) * 2.5f);
+            float zoff = (-1.0f + (2.0f*j+1)/lineWidth);
+//            yoff = 0;
 
             // Use the tiny math library to apply a 3D transformation to the instance.
-            float4x4 scale = math::makeScale( (float3){ scl, scl, scl } );
-            float4x4 zrot = math::makeZRotate( _angle );
-            float4x4 yrot = math::makeYRotate( _angle );
+            float4x4 scale = math::makeScale( (float3){ scl, scl, scl } ); // resize to be smaller in the scene
+            float4x4 zrot = math::makeZRotate( -cos( (iDivNumInstances + _angle) * 2.5f) /*/ ( (1 + sqrt(5)) / 2)*/ ); // rolling direction in direction of travel
+//            float4x4 yrot = math::makeYRotate( _angle ); // spin along vertical axis
+            float4x4 yrot = math::makeIdentity();
             float4x4 translate = math::makeTranslate( math::add( objectPosition, { xoff, yoff, zoff } ) );
+//            float4x4 translate = math::makeIdentity();
 
             pInstanceData[ globalCtr ].instanceTransform = fullObjectRot * translate * yrot * zrot * scale;
 
@@ -573,7 +602,7 @@ void Renderer::draw( MTK::View* pView )
     pEnc->setFrontFacingWinding( MTL::Winding::WindingCounterClockwise );
 
     pEnc->drawIndexedPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle,
-                                6 * 6, MTL::IndexType::IndexTypeUInt16,
+                                4*3, MTL::IndexType::IndexTypeUInt16,
                                 _pIndexBuffer,
                                 0,
                                 kNumInstances*lineWidth );

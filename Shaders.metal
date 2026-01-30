@@ -13,6 +13,7 @@ struct v2f
 {
     float4 position [[position]];
     half3 color;
+    float3 normal;
 };
 
 struct VertexData
