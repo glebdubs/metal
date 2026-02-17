@@ -26,9 +26,11 @@
 #include <MetalKit/MetalKit.hpp>
 
 #include <simd/simd.h>
+#include <thread>
+#include <chrono>
 
-static constexpr size_t kNumInstances = 8;
-static constexpr size_t lineWidth = 3;
+static constexpr size_t kNumInstances = 16;
+static constexpr size_t lineWidth = 5;
 static constexpr size_t kMaxFramesInFlight = 3;
 
 
@@ -314,10 +316,10 @@ namespace math
     simd::float4x4 makeScale( const simd::float3& v )
     {
         using simd::float4;
-        return simd_matrix((float4){ v.x, 0, 0, 0 },
-                           (float4){ 0, v.y, 0, 0 },
-                           (float4){ 0, 0, v.z, 0 },
-                           (float4){ 0, 0, 0, 1.0 });
+        return simd_matrix((float4){ v.x,   0,   0,   0 },
+                           (float4){   0, v.y,   0,   0 },
+                           (float4){   0,   0, v.z,   0 },
+                           (float4){   0,   0,   0, 1.0 });
     }
 
 }
@@ -362,10 +364,16 @@ Renderer::~Renderer()
 
 namespace shader_types
 {
+    struct VertexData {
+        simd::float3 position;
+        simd::float3 normal;
+    };
+
     struct InstanceData
     {
         simd::float4x4 instanceTransform;
         simd::float4 instanceColor;
+        simd::float3 travel;
     };
 
     struct CameraData
@@ -429,24 +437,21 @@ void Renderer::buildBuffers()
     using simd::float3;
     const float s = 0.5f;
     
-    /*
-    float3 verts[] = { // 8 vertices of a triangle
-        { -s, -s, +s },
-        { +s, -s, +s },
-        { +s, +s, +s },
-        { -s, +s, +s },
-
-        { -s, -s, -s },
-        { -s, +s, -s },
-        { +s, +s, -s },
-        { +s, -s, -s }
-    };
-    */
+    
     
 //    const float ctp = cos( (2 * M_PI) / 3);
 //    const float stp = sin( (2 * M_PI) / 3);
 //    const float tSecond = s*stp;
 
+    /// SIMPLE TETRAHEDRA
+//    float3 verts[] = { // tetrahedron made of equilateral triangles coordcs
+//        {+s, 0, 0},
+//        {-s / 3.0f, (2.0f * sqrt(2.0f)) * s / 3.0f, 0.0f},
+//        {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, (sqrt(6.0f) / 3) * s},
+//        {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, -(sqrt(6.0f) / 3) * s}
+//    };
+
+    // TETRAHEDRA WITH DIRECTION
     float3 verts[] = { // tetrahedron made of equilateral triangles coordcs
         {+s, 0, 0},
         {-s / 3.0f, (2.0f * sqrt(2.0f)) * s / 3.0f, 0.0f},
@@ -454,28 +459,40 @@ void Renderer::buildBuffers()
         {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, -(sqrt(6.0f) / 3) * s}
     };
 
-    /*
-    uint16_t indices[] = { // all 12 triangles it takes to make 2 triangles for each of the 6 faces of a cube
-        0, 1, 2, front
-        2, 3, 0,
-
-        1, 7, 6, right
-        6, 2, 1,
-
-        7, 4, 5, back
-        5, 6, 7,
-
-        4, 0, 3, left
-        3, 5, 4,
-
-        3, 2, 6, top
-        6, 5, 3,
-
-        4, 7, 1, bottom
-        1, 0, 4
-    };
     
-    */
+//    float3 verts[] = { // 8 vertices of a triangle
+//        { -s, -s, +s },
+//        { +s, -s, +s },
+//        { +s, +s, +s },
+//        { -s, +s, +s },
+//
+//        { -s, -s, -s },
+//        { -s, +s, -s },
+//        { +s, +s, -s },
+//        { +s, -s, -s }
+//    };
+//
+//    uint16_t indices[] = { // all 12 triangles it takes to make 2 triangles for each of the 6 faces of a cube
+//        0, 1, 2, /* front */
+//        2, 3, 0,
+//
+//        1, 7, 6, /* right */
+//        6, 2, 1,
+//
+//        7, 4, 5, /* back */
+//        5, 6, 7,
+//
+//        4, 0, 3, /* left */
+//        3, 5, 4,
+//
+//        3, 2, 6, /* top */
+//        6, 5, 3,
+//
+//        4, 7, 1, /* bottom */
+//        1, 0, 4
+//    };
+    
+    
     
     
     uint16_t indices[] = { // all 12 triangles it takes to make 2 triangles for each of the 6 faces of a cube
@@ -485,12 +502,16 @@ void Renderer::buildBuffers()
         0, 3, 1, /* right */
         1, 3, 2,
     };
+    
+    
 
     const size_t vertexDataSize = sizeof( verts );
     const size_t indexDataSize = sizeof( indices );
+//    const size_t positionDataSize = sizeof( /* fill this in*/ );
 
     MTL::Buffer* pVertexBuffer = _pDevice->newBuffer( vertexDataSize, MTL::ResourceStorageModeManaged );
     MTL::Buffer* pIndexBuffer = _pDevice->newBuffer( indexDataSize, MTL::ResourceStorageModeManaged );
+//    MTL::Buffer* pPositionBuffer =_pDevice->newBuffer( positionDataSize, MTL::ResourceStorageModeManaged );
 
     _pVertexDataBuffer = pVertexBuffer;
     _pIndexBuffer = pIndexBuffer;
@@ -506,12 +527,57 @@ void Renderer::buildBuffers()
     {
         _pInstanceDataBuffer[ i ] = _pDevice->newBuffer( instanceDataSize, MTL::ResourceStorageModeManaged );
     }
+    
+    using simd::float3;
+    using simd::float4;
+    using simd::float4x4;
+    
+    const float scl = 0.5f;
+
+    float3 objectPosition = { 0.f, 0.f, -7.f };
+    
+    size_t globalCtr = 0;
+
+    for( size_t f=0; f<kMaxFramesInFlight; ++f) {
+        
+        shader_types::InstanceData* pInstanceData = reinterpret_cast< shader_types::InstanceData *>( _pInstanceDataBuffer[ f ]->contents() );
+        globalCtr = 0;
+        
+        for( size_t j=0; j<lineWidth; j++) {
+            for ( size_t i = 0; i < kNumInstances; ++i ) {
+                float ictr = i / (float)kNumInstances;
+                
+                float xoff = (ictr * 4.0f - 2.0f) + (1.f/kNumInstances);
+                float yoff = -1.5f;
+                float zoff = (-1.0f + (2.0f*j+1)/lineWidth);
+                
+
+                float4x4 scale = math::makeScale( (float3) { scl, scl, scl } );
+                float4x4 translate = math::makeTranslate( math::add( objectPosition, { xoff, yoff, zoff } ) );
+                
+                float4x4 pre = math::makeTranslate(objectPosition);
+                float4x4 yRot = math::makeYRotate(0.01f * (f+1));
+                float4x4 post = math::makeTranslate(float3{-objectPosition.x, -objectPosition.y, -objectPosition.z});
+
+                pInstanceData[ globalCtr ].instanceTransform = translate * scale * (pre * yRot * post);
+
+                float r = ictr;
+                float g = 1.0f - r;
+                float b = sinf( M_PI * ictr );
+                pInstanceData[ globalCtr ].instanceColor = (float4){ r, g, b, 1.0f };
+                globalCtr++;
+            }
+        }
+        _pInstanceDataBuffer[f]->didModifyRange( NS::Range::Make( 0, _pInstanceDataBuffer[f]->length() ) );
+    }
+
 
     const size_t cameraDataSize = kMaxFramesInFlight * sizeof( shader_types::CameraData );
     for ( size_t i = 0; i < kMaxFramesInFlight; ++i )
     {
         _pCameraDataBuffer[ i ] = _pDevice->newBuffer( cameraDataSize, MTL::ResourceStorageModeManaged );
     }
+    _frame = 2;
 }
 
 void Renderer::draw( MTK::View* pView )
@@ -522,6 +588,7 @@ void Renderer::draw( MTK::View* pView )
 
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
+    
     _frame = (_frame + 1) % Renderer::kMaxFramesInFlight;
     MTL::Buffer* pInstanceDataBuffer = _pInstanceDataBuffer[ _frame ];
 
@@ -532,50 +599,37 @@ void Renderer::draw( MTK::View* pView )
         dispatch_semaphore_signal( pRenderer->_semaphore );
     });
 
-    _angle += 0.01f;
-
-    const float scl = 0.5f;
+    _angle = 0.01f * kMaxFramesInFlight;
+//
+//    const float scl = 0.5f;
     shader_types::InstanceData* pInstanceData = reinterpret_cast< shader_types::InstanceData *>( pInstanceDataBuffer->contents() );
-
-    float3 objectPosition = { 0.f, 0.f, -7.f };
-
-    // Update instance positions:
-
-    float4x4 rt = math::makeTranslate( objectPosition );
-    float4x4 rr = math::makeYRotate( -_angle );
-    float4x4 rtInv = math::makeTranslate( { -objectPosition.x, -objectPosition.y, -objectPosition.z } );
-    float4x4 fullObjectRot = rt * rr * rtInv;
-//    fullObjectRot = math::makeIdentity();
-    
+//
+//    
     size_t globalCtr = 0;
+    
+    for(size_t i=0; i<lineWidth * kNumInstances; i++) {
+        float3 pos = pInstanceData[ globalCtr ].instanceTransform.columns[3].xyz;
+        
+    }
+    
+    globalCtr = 0;
 
     for( size_t j=0; j<lineWidth; j++) {
-        for ( size_t i = 0; i < kNumInstances; ++i )
-        {
-            float iDivNumInstances = i / (float)kNumInstances;
-            float xoff = (iDivNumInstances * 4.0f - 2.0f) + (1.f/kNumInstances);
-            float yoff = sin( ( iDivNumInstances + _angle ) * 2.5f);
-            float zoff = (-1.0f + (2.0f*j+1)/lineWidth);
-//            yoff = 0;
-
-            // Use the tiny math library to apply a 3D transformation to the instance.
-            float4x4 scale = math::makeScale( (float3){ scl, scl, scl } ); // resize to be smaller in the scene
-            float4x4 zrot = math::makeZRotate( -cos( (iDivNumInstances + _angle) * 2.5f) /*/ ( (1 + sqrt(5)) / 2)*/ ); // rolling direction in direction of travel
-//            float4x4 yrot = math::makeYRotate( _angle ); // spin along vertical axis
-            float4x4 yrot = math::makeIdentity();
-            float4x4 translate = math::makeTranslate( math::add( objectPosition, { xoff, yoff, zoff } ) );
-//            float4x4 translate = math::makeIdentity();
-
-            pInstanceData[ globalCtr ].instanceTransform = fullObjectRot * translate * yrot * zrot * scale;
-
-            float r = iDivNumInstances;
-            float g = 1.0f - r;
-            float b = sinf( M_PI * 2.0f * iDivNumInstances );
-            pInstanceData[ globalCtr ].instanceColor = (float4){ r, g, b, 1.0f };
+        for ( size_t i = 0; i < kNumInstances; ++i ) {
+            float3 objectPosition  = pInstanceData[ globalCtr ].instanceTransform.columns[3].xyz;
+            
+            float4x4 rt = math::makeTranslate( objectPosition );
+            float4x4 rr = math::makeYRotate( _angle );
+            float4x4 rtInv = math::makeTranslate( { -objectPosition.x, -objectPosition.y, -objectPosition.z } );
+            float4x4 fullObjectRot = rt * rr * rtInv;
+            
+            pInstanceData[ globalCtr ].instanceTransform *= fullObjectRot;
+            
             globalCtr++;
+            
         }
     }
-
+//
     pInstanceDataBuffer->didModifyRange( NS::Range::Make( 0, pInstanceDataBuffer->length() ) );
 
     // Update camera state:
@@ -602,7 +656,7 @@ void Renderer::draw( MTK::View* pView )
     pEnc->setFrontFacingWinding( MTL::Winding::WindingCounterClockwise );
 
     pEnc->drawIndexedPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle,
-                                4*3, MTL::IndexType::IndexTypeUInt16,
+                                12, MTL::IndexType::IndexTypeUInt16,
                                 _pIndexBuffer,
                                 0,
                                 kNumInstances*lineWidth );
@@ -612,6 +666,8 @@ void Renderer::draw( MTK::View* pView )
     pCmd->commit();
 
     pPool->release();
+    
+//    std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
 #pragma endregion Renderer }
