@@ -21,17 +21,39 @@
 #define MTL_PRIVATE_IMPLEMENTATION
 #define MTK_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
+
+//#ifdef x
+//    #warning "x was defined as a macro — undefining to avoid metal-cpp clash"
+//    #undef x
+//#endif
+//
+//// Also check common case variants
+//#ifdef X
+//    #undef X
+//#endif
+
 #include <Metal/Metal.hpp>
 #include <AppKit/AppKit.hpp>
 #include <MetalKit/MetalKit.hpp>
 
 #include <simd/simd.h>
+#include <iostream>
 #include <thread>
 #include <chrono>
+#include <cstdlib>
 
-static constexpr size_t kNumInstances = 16;
-static constexpr size_t lineWidth = 5;
+static constexpr size_t kNumInstances = 32;
+static constexpr size_t lineWidth = 32;
 static constexpr size_t kMaxFramesInFlight = 3;
+static constexpr size_t objCount = lineWidth * kNumInstances;
+
+static constexpr size_t boidInnerRadSq = 1;
+static constexpr size_t boidOuterRadSq = 5;
+
+static constexpr float avoidanceVectorStrength = 8;
+static constexpr float directionConvergenceStrength = 2;
+static constexpr float clusteringStrength = 0.5;
+static constexpr int windowSize = 20;
 
 
 #pragma region Declarations {
@@ -39,7 +61,15 @@ static constexpr size_t kMaxFramesInFlight = 3;
 namespace math
 {
     constexpr simd::float3 add( const simd::float3& a, const simd::float3& b );
+    constexpr simd::float3 sub( const simd::float3& a, const simd::float3& b );
     constexpr simd_float4x4 makeIdentity();
+    float randomFloat();
+    float getDistanceSquared(simd::float3& a, simd::float3& b);
+    float getMagnitude(const simd::float3& a);
+    float fclamp(const float a, const float max, const float min);
+    simd::float4 f3tf4(const simd::float3& a);
+    simd::float3 multByConstant(const simd::float3& a, float b);
+    simd::float3 randomFloat3();
     simd::float4x4 makePerspective();
     simd::float4x4 makeXRotate( float angleRadians );
     simd::float4x4 makeYRotate( float angleRadians );
@@ -68,6 +98,7 @@ class Renderer
         MTL::Buffer* _pInstanceDataBuffer[kMaxFramesInFlight];
         MTL::Buffer* _pCameraDataBuffer[kMaxFramesInFlight];
         MTL::Buffer* _pIndexBuffer;
+        simd::float3 directions[kMaxFramesInFlight][objCount];
         float _angle;
         int _frame;
         dispatch_semaphore_t _semaphore;
@@ -185,7 +216,7 @@ void MyAppDelegate::applicationWillFinishLaunching( NS::Notification* pNotificat
 
 void MyAppDelegate::applicationDidFinishLaunching( NS::Notification* pNotification )
 {
-    CGRect frame = (CGRect){ {100.0, 100.0}, {768, 768} };
+    CGRect frame = (CGRect){ {100.0, 100.0}, {1024, 1024} };
 
     _pWindow = NS::Window::alloc()->init(
         frame,
@@ -247,9 +278,48 @@ void MyMTKViewDelegate::drawInMTKView( MTK::View* pView )
 
 namespace math
 {
+
+    float randomFloat() {
+        return (float)rand();
+    }
+
+    simd::float3 randomFloat3() {
+        return simd::float3{randomFloat(), randomFloat(), randomFloat()};
+    }
+
+    float getDistanceSquared(simd::float3& a, simd::float3& b) {
+        float x = a.x - b.x;
+        float y = a.y - b.y;
+        float z = a.z - b.z;
+        return (float)( x*x + y*y + z*z );
+    }
+
     constexpr simd::float3 add( const simd::float3& a, const simd::float3& b )
     {
         return { a.x + b.x, a.y + b.y, a.z + b.z };
+    }
+
+    constexpr simd::float3 sub( const simd::float3& a, const simd::float3& b )
+    {
+        return { a.x - b.x, a.y - b.y, a.z - b.z };
+    }
+
+    float getMagnitude(const simd::float3& a) {
+        return (float)(a.x*a.x + a.y*a.y + a.z*a.z);
+    }
+
+    simd::float3 multByConstant( const simd::float3& a, float b) {
+        return simd::float3 {a.x*b, a.y*b, a.z*b};
+    }
+
+    float fclamp(const float a, const float min, const float max) {
+        if(a < min) return min;
+        if(a > max) return max;
+        return a;
+    }
+
+    simd::float4 f3tf4(const simd::float3& a) {
+        return simd::float4 {a.x, a.y, a.z, 0};
     }
 
     constexpr simd_float4x4 makeIdentity()
@@ -366,14 +436,12 @@ namespace shader_types
 {
     struct VertexData {
         simd::float3 position;
-        simd::float3 normal;
     };
 
     struct InstanceData
     {
         simd::float4x4 instanceTransform;
         simd::float4 instanceColor;
-        simd::float3 travel;
     };
 
     struct CameraData
@@ -436,22 +504,12 @@ void Renderer::buildBuffers()
 {
     using simd::float3;
     const float s = 0.5f;
-    
-    
-    
+
 //    const float ctp = cos( (2 * M_PI) / 3);
 //    const float stp = sin( (2 * M_PI) / 3);
 //    const float tSecond = s*stp;
 
     /// SIMPLE TETRAHEDRA
-//    float3 verts[] = { // tetrahedron made of equilateral triangles coordcs
-//        {+s, 0, 0},
-//        {-s / 3.0f, (2.0f * sqrt(2.0f)) * s / 3.0f, 0.0f},
-//        {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, (sqrt(6.0f) / 3) * s},
-//        {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, -(sqrt(6.0f) / 3) * s}
-//    };
-
-    // TETRAHEDRA WITH DIRECTION
     float3 verts[] = { // tetrahedron made of equilateral triangles coordcs
         {+s, 0, 0},
         {-s / 3.0f, (2.0f * sqrt(2.0f)) * s / 3.0f, 0.0f},
@@ -459,7 +517,7 @@ void Renderer::buildBuffers()
         {-s / 3.0f, -sqrt(2.0f) * s / 3.0f, -(sqrt(6.0f) / 3) * s}
     };
 
-    
+
 //    float3 verts[] = { // 8 vertices of a triangle
 //        { -s, -s, +s },
 //        { +s, -s, +s },
@@ -491,10 +549,10 @@ void Renderer::buildBuffers()
 //        4, 7, 1, /* bottom */
 //        1, 0, 4
 //    };
-    
-    
-    
-    
+
+
+
+
     uint16_t indices[] = { // all 12 triangles it takes to make 2 triangles for each of the 6 faces of a cube
         0, 1, 2, /* front */
         0, 2, 3,
@@ -502,16 +560,17 @@ void Renderer::buildBuffers()
         0, 3, 1, /* right */
         1, 3, 2,
     };
-    
-    
+
+//    for(size_t i=0; i<lineWidth * kNumInstances; i++) {
+//        directions[i] = simd::normalize(simd::float3{math::randomFloat(), math::randomFloat(), math::randomFloat()});
+//    }
+
 
     const size_t vertexDataSize = sizeof( verts );
     const size_t indexDataSize = sizeof( indices );
-//    const size_t positionDataSize = sizeof( /* fill this in*/ );
 
     MTL::Buffer* pVertexBuffer = _pDevice->newBuffer( vertexDataSize, MTL::ResourceStorageModeManaged );
     MTL::Buffer* pIndexBuffer = _pDevice->newBuffer( indexDataSize, MTL::ResourceStorageModeManaged );
-//    MTL::Buffer* pPositionBuffer =_pDevice->newBuffer( positionDataSize, MTL::ResourceStorageModeManaged );
 
     _pVertexDataBuffer = pVertexBuffer;
     _pIndexBuffer = pIndexBuffer;
@@ -522,39 +581,39 @@ void Renderer::buildBuffers()
     _pVertexDataBuffer->didModifyRange( NS::Range::Make( 0, _pVertexDataBuffer->length() ) );
     _pIndexBuffer->didModifyRange( NS::Range::Make( 0, _pIndexBuffer->length() ) );
 
-    const size_t instanceDataSize = kMaxFramesInFlight * kNumInstances * lineWidth * sizeof( shader_types::InstanceData );
+    const size_t instanceDataSize = kMaxFramesInFlight * objCount * sizeof( shader_types::InstanceData );
     for ( size_t i = 0; i < kMaxFramesInFlight; ++i )
     {
         _pInstanceDataBuffer[ i ] = _pDevice->newBuffer( instanceDataSize, MTL::ResourceStorageModeManaged );
     }
-    
+
     using simd::float3;
     using simd::float4;
     using simd::float4x4;
-    
+
     const float scl = 0.5f;
 
-    float3 objectPosition = { 0.f, 0.f, -7.f };
-    
+    float3 objectPosition = { 0.f, 0.f, -10.f };
+
     size_t globalCtr = 0;
 
     for( size_t f=0; f<kMaxFramesInFlight; ++f) {
-        
+
         shader_types::InstanceData* pInstanceData = reinterpret_cast< shader_types::InstanceData *>( _pInstanceDataBuffer[ f ]->contents() );
         globalCtr = 0;
-        
+
         for( size_t j=0; j<lineWidth; j++) {
             for ( size_t i = 0; i < kNumInstances; ++i ) {
                 float ictr = i / (float)kNumInstances;
-                
+
                 float xoff = (ictr * 4.0f - 2.0f) + (1.f/kNumInstances);
                 float yoff = -1.5f;
                 float zoff = (-1.0f + (2.0f*j+1)/lineWidth);
-                
+
 
                 float4x4 scale = math::makeScale( (float3) { scl, scl, scl } );
                 float4x4 translate = math::makeTranslate( math::add( objectPosition, { xoff, yoff, zoff } ) );
-                
+
                 float4x4 pre = math::makeTranslate(objectPosition);
                 float4x4 yRot = math::makeYRotate(0.01f * (f+1));
                 float4x4 post = math::makeTranslate(float3{-objectPosition.x, -objectPosition.y, -objectPosition.z});
@@ -565,6 +624,9 @@ void Renderer::buildBuffers()
                 float g = 1.0f - r;
                 float b = sinf( M_PI * ictr );
                 pInstanceData[ globalCtr ].instanceColor = (float4){ r, g, b, 1.0f };
+
+                // set direction of travel!!!
+                directions[f][globalCtr] = simd::normalize(math::randomFloat3());
                 globalCtr++;
             }
         }
@@ -588,9 +650,14 @@ void Renderer::draw( MTK::View* pView )
 
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
-    
-    _frame = (_frame + 1) % Renderer::kMaxFramesInFlight;
+
+//    _frame = (_frame + 1) % Renderer::kMaxFramesInFlight;
+//    int lastFrame = _frame-1;
+//    if(lastFrame < 0) lastFrame = kMaxFramesInFlight-1;
+    int lastFrame = _frame = 1;
+
     MTL::Buffer* pInstanceDataBuffer = _pInstanceDataBuffer[ _frame ];
+    MTL::Buffer* prevInstDataBuffer = _pInstanceDataBuffer[ lastFrame ];
 
     MTL::CommandBuffer* pCmd = _pCommandQueue->commandBuffer();
     dispatch_semaphore_wait( _semaphore, DISPATCH_TIME_FOREVER );
@@ -599,36 +666,92 @@ void Renderer::draw( MTK::View* pView )
         dispatch_semaphore_signal( pRenderer->_semaphore );
     });
 
-    _angle = 0.01f * kMaxFramesInFlight;
-//
+    _angle = 0.02f * kMaxFramesInFlight;
+
 //    const float scl = 0.5f;
     shader_types::InstanceData* pInstanceData = reinterpret_cast< shader_types::InstanceData *>( pInstanceDataBuffer->contents() );
-//
-//    
-    size_t globalCtr = 0;
-    
-    for(size_t i=0; i<lineWidth * kNumInstances; i++) {
-        float3 pos = pInstanceData[ globalCtr ].instanceTransform.columns[3].xyz;
-        
-    }
-    
-    globalCtr = 0;
+    shader_types::InstanceData* prevInstData = reinterpret_cast< shader_types::InstanceData *>( prevInstDataBuffer->contents() );
 
-    for( size_t j=0; j<lineWidth; j++) {
-        for ( size_t i = 0; i < kNumInstances; ++i ) {
-            float3 objectPosition  = pInstanceData[ globalCtr ].instanceTransform.columns[3].xyz;
-            
-            float4x4 rt = math::makeTranslate( objectPosition );
-            float4x4 rr = math::makeYRotate( _angle );
-            float4x4 rtInv = math::makeTranslate( { -objectPosition.x, -objectPosition.y, -objectPosition.z } );
-            float4x4 fullObjectRot = rt * rr * rtInv;
-            
-            pInstanceData[ globalCtr ].instanceTransform *= fullObjectRot;
-            
-            globalCtr++;
-            
+
+    for(int i=0; i<objCount; i++) {
+        float3 lastPos = prevInstData[ i ].instanceTransform.columns[3].xyz;
+
+//        std::cout << "lastFrame : " << lastFrame << ", i : " << i << ", _frame : " << _frame << "\n";
+        float3 dir = directions[lastFrame][i];
+
+
+//        float3 otherPos = prevInstData[ 1 ].instanceTransform.columns[3].xyz;
+//        float3 toOtherVec = math::sub(otherPos, lastPos);
+//
+//        dir = math::add(dir, math::multByConstant(directions[lastFrame][1], directionConvergenceStrength) );
+//        dir = math::add(dir, math::multByConstant(simd::normalize(toOtherVec), clusteringStrength) );
+//        std::cout << "BEFORE direction vector : "<< dir.x << ", " << dir.y << ", " << dir.z << ". \n";
+        for(int j=0; j<objCount; j++) {
+            if(j == i) continue;
+            float3 otherPos = prevInstData[ j ].instanceTransform.columns[3].xyz;
+
+            float3 toOtherVec = math::sub(otherPos, lastPos);
+
+            float dist = math::getDistanceSquared(lastPos, otherPos);
+
+            if(dist > boidOuterRadSq) continue;
+
+            else if( dist > boidInnerRadSq) {
+                dir = math::add(dir, math::multByConstant(directions[lastFrame][j], directionConvergenceStrength) );
+                dir = math::add(dir, math::multByConstant(toOtherVec, clusteringStrength) );
+//                std::cout << "A";
+            } else if(dist <= boidInnerRadSq){
+                /// avoidance vector constant initially set to 3 to increase how much boids avoid collision at close proximity
+                dir = math::add(dir, math::multByConstant(simd::float3{-toOtherVec.x, -toOtherVec.y, -toOtherVec.z}, avoidanceVectorStrength) );
+//                std::cout << "B";
+            }
         }
+
+        float spd = abs(math::getMagnitude(dir));
+
+        float r = math::fclamp(spd/200, 0, 1);
+        float g = math::fclamp(spd/1000, 0, 1);
+        float b = 0;
+
+        pInstanceData[ i ].instanceColor = (float4){ r, g, b, 1.0f };
+
+        directions[_frame][i] = simd::normalize(dir);
+//        std::cout << "Position vector of boid " << i << " in frame " << lastFrame << " : " << lastPos.x << ", " << lastPos.y << ", " << lastPos.z << ". \n";
+
+        pInstanceData[i].instanceTransform.columns[3].xyz = math::add(lastPos, math::multByConstant(dir, 0.003f));
+
+        auto& posi = pInstanceData[i].instanceTransform.columns[3];
+        if(posi.x > (windowSize/2)) posi.x -= windowSize;
+        else if(posi.x < -(windowSize/2)) posi.x += windowSize;
+
+        if(posi.y > (windowSize/2)) posi.y -= windowSize;
+        else if(posi.y < -(windowSize/2)) posi.y += windowSize;
+
+        if(posi.z > -(windowSize/2)) posi.z -= windowSize;
+        else if(posi.z < -(3*windowSize/2)) posi.z += windowSize;
     }
+
+
+
+
+//    int globalCtr = 0;
+//    float3 objectPosition = {0, 0, 0.f};
+//
+//    for( size_t j=0; j<lineWidth; j++) {
+//        for ( size_t i = 0; i < kNumInstances; ++i ) {
+////            float3 objectPosition  = pInstanceData[ globalCtr ].instanceTransform.columns[3].xyz;
+//
+//            float4x4 rt = math::makeTranslate( objectPosition );
+//            float4x4 rr = math::makeYRotate( _angle );
+//            float4x4 rtInv = math::makeTranslate( { -objectPosition.x, -objectPosition.y, -objectPosition.z } );
+//            float4x4 fullObjectRot = rt * rr * rtInv;
+//
+//            pInstanceData[ globalCtr ].instanceTransform *= fullObjectRot;
+//
+//            globalCtr++;
+//
+//        }
+//    }
 //
     pInstanceDataBuffer->didModifyRange( NS::Range::Make( 0, pInstanceDataBuffer->length() ) );
 
@@ -636,7 +759,7 @@ void Renderer::draw( MTK::View* pView )
 
     MTL::Buffer* pCameraDataBuffer = _pCameraDataBuffer[ _frame ];
     shader_types::CameraData* pCameraData = reinterpret_cast< shader_types::CameraData *>( pCameraDataBuffer->contents() );
-    pCameraData->perspectiveTransform = math::makePerspective( 45.f * M_PI / 180.f, 1.f, 0.03f, 500.0f ) ;
+    pCameraData->perspectiveTransform = math::makePerspective( 90.f * M_PI / 180.f, 1.f, 0.03f, 500.0f ) ;
     pCameraData->worldTransform = math::makeIdentity();
     pCameraDataBuffer->didModifyRange( NS::Range::Make( 0, sizeof( shader_types::CameraData ) ) );
 
@@ -655,20 +778,21 @@ void Renderer::draw( MTK::View* pView )
     pEnc->setCullMode( MTL::CullModeBack );
     pEnc->setFrontFacingWinding( MTL::Winding::WindingCounterClockwise );
 
+//    std::cout << "GOT TO DRAWING!!! \n";
+
     pEnc->drawIndexedPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle,
                                 12, MTL::IndexType::IndexTypeUInt16,
                                 _pIndexBuffer,
                                 0,
-                                kNumInstances*lineWidth );
+                                objCount );
 
     pEnc->endEncoding();
     pCmd->presentDrawable( pView->currentDrawable() );
     pCmd->commit();
 
     pPool->release();
-    
-//    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+//    std::this_thread::sleep_for(std::chrono::seconds(3));
 }
 
 #pragma endregion Renderer }
-
